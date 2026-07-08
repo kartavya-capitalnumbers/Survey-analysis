@@ -1,0 +1,18 @@
+# Narrative Document Analysis — Streamlit prototype (Mode 2, Phase 1)
+#
+# Prototype dependency set. Uses AWS Bedrock (boto3, Converse API) for the LLM —
+# default model is Amazon Nova Lite. Production narrative-mode ingestion will
+# additionally require: AWS Textract (higher-fidelity OCR for scans) and
+# pinecone-client (multi-document retrieval) — neither is used here.
+
+streamlit>=1.33
+pdfplumber>=0.11        # text + table + char-level font extraction (digital PDFs)
+PyMuPDF>=1.24           # (imported as `fitz`) embedded image extraction + page render for OCR
+boto3>=1.34             # AWS Bedrock runtime client (Nova/Claude via converse)
+pandas>=2.0             # schema flattening -> CSV export
+python-docx>=1.1        # qualitative analysis report export (DOCX)
+pytesseract>=0.3.10     # OCR fallback for scanned / image-only pages
+Pillow>=10.0            # image handling for the OCR path
+# NOTE: pytesseract needs the Tesseract binary installed separately (not via pip).
+#   Windows: install the UB-Mannheim build, then set TESSERACT_CMD to its path
+#   if tesseract.exe is not on PATH.
