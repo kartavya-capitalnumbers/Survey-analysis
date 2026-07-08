@@ -8,6 +8,7 @@ __pycache__/
 venv/
 .venv/
 env/
+Survey Analysis Files/
 .env
 
 # Distribution / packaging

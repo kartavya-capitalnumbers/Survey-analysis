@@ -13,6 +13,9 @@ pandas>=2.0             # schema flattening -> CSV export
 python-docx>=1.1        # qualitative analysis report export (DOCX)
 pytesseract>=0.3.10     # OCR fallback for scanned / image-only pages
 Pillow>=10.0            # image handling for the OCR path
+openpyxl>=3.1           # Excel (.xlsx) statistical-table export (stats prototype)
+altair>=5.0             # bar/pie/pyramid charts (stats prototype)
+vl-convert-python>=1.0  # Altair chart -> PNG export (stats prototype)
 # NOTE: pytesseract needs the Tesseract binary installed separately (not via pip).
 #   Windows: install the UB-Mannheim build, then set TESSERACT_CMD to its path
 #   if tesseract.exe is not on PATH.
