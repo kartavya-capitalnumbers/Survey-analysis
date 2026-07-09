@@ -338,6 +338,7 @@ def analysis_row(form: ExtractedForm) -> Dict[str, Any]:
         "head_age": r.get("head_age"),
         "head_age_group": age_group(r.get("head_age")),
         "education_level": r.get("education_level"),
+        "head_occupation": r.get("head_occupation"),
         "ethnicity": r.get("ethnicity"),
         "religion": r.get("religion"),
         "tenure_category": r.get("tenure_category"),
@@ -353,6 +354,7 @@ def analysis_row(form: ExtractedForm) -> Dict[str, Any]:
         "electricity_access": r.get("electricity_access"),
         "primary_cooking_fuel": r.get("primary_cooking_fuel"),
         "land_area_ha": r.get("land_area_ha"),
+        "livestock": r.get("livestock"),
         "monthly_income_usd": (
             (r["income_low"] + r["income_high"]) / 2
             if r.get("income_low") is not None and r.get("income_high") is not None

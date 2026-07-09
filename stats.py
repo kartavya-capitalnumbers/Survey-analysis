@@ -392,13 +392,70 @@ def compare_subsets(
     )
 
 
+def list_rows(
+    df: pd.DataFrame,
+    columns: Optional[List[str]] = None,
+    *,
+    filters: Optional[List[Dict[str, Any]]] = None,
+    limit: int = 200,
+) -> StatResult:
+    """Row-level lookup — "which households/IDs match X", not an aggregate.
+    Same filter machinery as every other operation; no LLM math, just a
+    filtered slice of the actual rows.
+    """
+    data, filter_note = _apply_filters(df, filters)
+    cols = [c for c in (columns or []) if c in data.columns] or list(data.columns)
+    table = data[cols].head(limit).reset_index(drop=True)
+    note = f" Showing the first {limit} of {len(data)}." if len(data) > limit else ""
+    return StatResult(
+        title=f"Matching rows{_filter_suffix(filter_note)}",
+        table=table,
+        n=len(data),
+        methodology=f"Rows matching the filter, columns: {cols}.{note}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Natural-language query planning (LLM translates; pandas computes)
 # ---------------------------------------------------------------------------
 
+_DOMAIN_CATEGORIES = (
+    "This dataset is a household socioeconomic / resettlement (RAP, IFC PS5) "
+    "baseline survey. Questions typically fall into these categories — use them "
+    "to read intent and pick columns/filters, they are NOT a fixed question "
+    "list:\n"
+    "  1. Census & demographics — totals, sex/age breakdown, dependency ratio, "
+    "household size, ethnicity, absentees.\n"
+    "  2. Land tenure & displacement type — tenure category, land area, land use.\n"
+    "  3. Vulnerability identification — vulnerability flags/count, priority cases, "
+    "consent/interpreter needs.\n"
+    "  4. Livelihoods & income — occupation, income level, subsistence vs cash, "
+    "remittances.\n"
+    "  5. Housing & infrastructure — dwelling materials, water, sanitation, "
+    "electricity, condition.\n"
+    "  6. Food security — food-insecure months, severity.\n"
+    "  7. Resettlement preferences & concerns — from the project_concern free text.\n"
+    "  8. Cross-tabulations & equity analysis — compare a metric across a "
+    "demographic/tenure/vulnerability subset (use compare_subsets or crosstab).\n"
+    "  9. Qualitative synthesis — themes, patterns, an overall narrative profile "
+    "(use narrative_summary).\n"
+    "  10. Compliance & reporting — whether the DATASET itself meets baseline "
+    "completeness expectations: sex-disaggregation coverage, footprint "
+    "accounting, incomplete surveys, escalation flags (use compliance_check).\n\n"
+)
+
 _PLAN_SYSTEM = (
-    "You translate a plain-English survey-analysis question into ONE statistical "
+    _DOMAIN_CATEGORIES
+    + "You translate a plain-English survey-analysis question into ONE statistical "
     "operation spec, as JSON. You never compute results yourself.\n\n"
+    "Up to TWO column profiles may be supplied: HOUSEHOLD-LEVEL (one row per "
+    "household) and INDIVIDUAL-LEVEL (one row per household member, if "
+    "supplied). Every plan must include \"dataset\": \"household\" or "
+    "\"members\" naming which one to run the operation against — pick "
+    "\"members\" whenever the question is about individuals rather than "
+    "households (sex, age, dependency ratio, population totals, occupation "
+    "of members) AND an individual-level profile was supplied; otherwise use "
+    "\"household\".\n\n"
     "Available operations:\n"
     '1. {"operation": "frequency", "field": "<column>", "filters": [...]}\n'
     "   — counts + percentages of one field's values.\n"
@@ -414,20 +471,39 @@ _PLAN_SYSTEM = (
     "lowest, with each subset's percentage of the top subset's mean. Use this "
     "for trend/comparison questions across subsets/zones/groups (e.g. 'which "
     "village has the highest income', 'compare X across zones').\n"
-    '5. {"operation": "narrative_summary"}\n'
+    '5. {"operation": "list_rows", "columns": ["<column>", ...], "filters": [...]}\n'
+    "   — lists the actual matching rows (e.g. household IDs) rather than a "
+    "count/aggregate. Use this whenever the question asks 'which households', "
+    "'what are their IDs', or otherwise wants the specific rows/identifiers "
+    "matching a condition, not just a count or percentage.\n"
+    '6. {"operation": "narrative_summary"}\n'
     "   — a written, multi-paragraph socioeconomic-profile narrative (household "
     "composition, livelihoods/income, vulnerability, housing/land/services, "
     "community concerns), suitable for a RAP/ESIA/ESDD chapter. Use this "
     "whenever the question asks for an overall summary, profile, narrative, or "
     "write-up of the dataset as a whole rather than one specific figure — do "
-    "NOT mark these 'unsupported'.\n\n"
+    "NOT mark these 'unsupported'.\n"
+    '7. {"operation": "compliance_check"}\n'
+    "   — a dataset-completeness/compliance check (category 10 above): sex-"
+    "disaggregation coverage, project-footprint accounting, incomplete surveys, "
+    "vulnerable-household summary, enumerator escalation flags. Use this "
+    "whenever the question is about whether the DATASET meets baseline/"
+    "reporting completeness requirements, not about the households' actual "
+    "characteristics.\n\n"
     'Each optional filter is {"field": "<column>", "op": "=="|"!="|">"|">="|"<"|'
     '"<="|"in"|"contains", "value": <scalar or list>}.\n\n'
     "Rules:\n"
     "- Return ONLY the JSON object. No prose, no markdown fences.\n"
-    "- Use EXACT column names from the provided column profile.\n"
-    "- Percentage questions about one field -> frequency (it includes percentages). "
-    "Use filters to restrict to the relevant subset instead of guessing.\n"
+    "- Use EXACT column names from the relevant column profile, and set "
+    "\"dataset\" to whichever profile (household/members) actually has those "
+    "columns.\n"
+    "- Percentage/count questions about one field -> frequency (it includes "
+    "percentages). Use filters to restrict to the relevant subset instead of "
+    "guessing.\n"
+    "- If a question asks BOTH for a count/percentage AND the specific "
+    "households/IDs matching it (e.g. 'how many ... and what are their IDs'), "
+    "use list_rows with a household_id column plus the relevant filter — the "
+    "row count is then evident from how many rows are listed.\n"
     "- Requests for an overall narrative/summary/profile -> narrative_summary, "
     "never 'unsupported'.\n"
     "- If the question cannot be answered with any of these operations on these "
@@ -436,19 +512,29 @@ _PLAN_SYSTEM = (
 )
 
 
-def build_plan_prompt(question: str, df: pd.DataFrame) -> Tuple[str, str]:
+def build_plan_prompt(
+    question: str, df: pd.DataFrame, members_df: Optional[pd.DataFrame] = None
+) -> Tuple[str, str]:
     """Return (system, user) for the query-planning call. Isolated for reuse."""
     profile = json.dumps(profile_columns(df), indent=2)
     user = (
-        f"COLUMN PROFILE of the survey dataset ({len(df)} rows):\n{profile}\n\n"
-        f"QUESTION: {question}"
+        f"HOUSEHOLD-LEVEL column profile ({len(df)} rows):\n{profile}\n\n"
     )
+    if members_df is not None and not members_df.empty:
+        members_profile = json.dumps(profile_columns(members_df), indent=2)
+        user += (
+            f"INDIVIDUAL-LEVEL column profile ({len(members_df)} rows, one per "
+            f"household member):\n{members_profile}\n\n"
+        )
+    user += f"QUESTION: {question}"
     return _PLAN_SYSTEM, user
 
 
-def plan_query(question: str, df: pd.DataFrame) -> Tuple[Optional[Dict[str, Any]], str]:
+def plan_query(
+    question: str, df: pd.DataFrame, members_df: Optional[pd.DataFrame] = None
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """Ask the LLM for an operation spec. Returns (plan_or_None, raw_response)."""
-    system, user = build_plan_prompt(question, df)
+    system, user = build_plan_prompt(question, df, members_df)
     raw = llm_client.complete_text(system, user, max_tokens=800)
     parsed = schema_mod._parse_json_lenient(raw)
     if not isinstance(parsed, dict):
@@ -476,6 +562,8 @@ def execute_plan(df: pd.DataFrame, plan: Dict[str, Any]) -> StatResult:
         )
     if op == "compare_subsets":
         return compare_subsets(df, plan.get("metric"), plan.get("by"), filters=filters)
+    if op == "list_rows":
+        return list_rows(df, plan.get("columns"), filters=filters)
     if op == "unsupported":
         raise StatsError(
             f"Not answerable statistically from this dataset: "
@@ -552,6 +640,86 @@ def compute_headline_stats(df: pd.DataFrame) -> Dict[str, Any]:
     return headline
 
 
+def compliance_report(
+    df: pd.DataFrame, members_df: Optional[pd.DataFrame] = None
+) -> List[Dict[str, Any]]:
+    """Category 10 (IFC PS5 compliance/reporting) checks — dataset completeness
+    questions, not statistics. No LLM: every finding comes directly from column
+    presence and coverage, since these are yes/no/gap questions about the DATA
+    itself, not something a language model should guess at.
+    """
+    out: List[Dict[str, Any]] = []
+
+    if members_df is not None and not members_df.empty and "sex" in members_df.columns:
+        missing = int((members_df["sex"].astype(str).str.strip() == "").sum())
+        if missing == 0:
+            finding = (
+                f"Sex is recorded for all {len(members_df)} extracted household "
+                f"members — key indicators can be sex-disaggregated."
+            )
+        else:
+            finding = (
+                f"Sex is recorded for {len(members_df) - missing} of "
+                f"{len(members_df)} extracted members; {missing} are missing sex "
+                f"and cannot be disaggregated."
+            )
+    else:
+        finding = "No household member roster was extracted — sex-disaggregated data is not available."
+    out.append({
+        "question": "Does the dataset include sex-disaggregated data for all key indicators?",
+        "finding": finding, "table": None,
+    })
+
+    out.append({
+        "question": "Are all households within the project footprint accounted for (including tenants, informal occupants, seasonal users)?",
+        "finding": (
+            "Cannot be determined from the survey dataset alone — this requires "
+            "comparing surveyed households against an independent project "
+            "footprint census or parcel count, which is outside this tool's scope."
+        ),
+        "table": None,
+    })
+
+    out.append({
+        "question": "Which households require follow-up visits before the census can be considered complete?",
+        "finding": (
+            "Not captured — the current extraction schema has no "
+            "'incomplete survey / needs revisit' field on the form."
+        ),
+        "table": None,
+    })
+
+    if "vulnerable_household" in df.columns:
+        vuln = df[df["vulnerable_household"] == "Yes"]
+        cols = [c for c in [
+            "household_id", "village", "vuln_elderly", "female_headed",
+            "vuln_disabled", "vuln_chronic_illness", "vuln_minority",
+            "vulnerability_count",
+        ] if c in vuln.columns]
+        table = vuln[cols].reset_index(drop=True) if len(vuln) else None
+        finding = (
+            f"{len(vuln)} of {len(df)} households flagged vulnerable (breakdown "
+            "in the table). 'Recommended follow-up action' is not captured by "
+            "the current extraction schema and is left for the analyst to complete."
+        )
+    else:
+        table, finding = None, "No vulnerability data available in this dataset."
+    out.append({
+        "question": "Summary table of all vulnerable households (ID, vulnerability type, follow-up action).",
+        "finding": finding, "table": table,
+    })
+
+    out.append({
+        "question": "List of households flagged by enumerators for supervisory review or escalation.",
+        "finding": (
+            "Not captured — the current extraction schema has no enumerator "
+            "escalation/review flag."
+        ),
+        "table": None,
+    })
+    return out
+
+
 _NARRATIVE_SYSTEM = (
     "You write a socioeconomic profile narrative for a Resettlement Action Plan "
     "(RAP) or ESIA/ESDD chapter, from already-computed survey statistics.\n"
@@ -603,18 +771,22 @@ def write_narrative_summary(
 
 
 def answer_statistical_question(
-    question: str, df: pd.DataFrame
+    question: str, df: pd.DataFrame, *, members_df: Optional[pd.DataFrame] = None
 ) -> Tuple[StatResult, str, Dict[str, Any]]:
     """Plan -> execute -> narrate. Returns (result, narration, plan).
 
     A 'narrative_summary' plan is handled separately: the "result" is a
     one-row headline-stats table (so the existing table+narration UI still
     renders something), and the "narration" is the full grounded write-up.
+    A 'compliance_check' plan (category 10 — dataset completeness, not a
+    household characteristic) is answered from compliance_report(), which
+    needs both `df` and `members_df` and does no LLM computation.
     """
-    plan, raw = plan_query(question, df)
+    plan, raw = plan_query(question, df, members_df)
     if plan is None:
         raise StatsError(f"Could not parse an operation plan from the model: {raw[:300]}")
-    if plan.get("operation") == "narrative_summary":
+    op = plan.get("operation")
+    if op == "narrative_summary":
         headline = compute_headline_stats(df)
         result = StatResult(
             title="Headline statistics",
@@ -624,6 +796,25 @@ def answer_statistical_question(
         )
         narration = write_narrative_summary(df)
         return result, narration, plan
-    result = execute_plan(df, plan)
+    if op == "compliance_check":
+        findings = compliance_report(df, members_df)
+        table = pd.DataFrame(
+            [{"check": f["question"], "finding": f["finding"]} for f in findings]
+        )
+        result = StatResult(
+            title="Dataset compliance / completeness check",
+            table=table,
+            n=len(df),
+            methodology=(
+                "Direct checks of column presence and coverage against IFC PS5 "
+                "baseline-completeness expectations; no LLM computation involved."
+            ),
+        )
+        narration = " ".join(f["finding"] for f in findings)
+        return result, narration, plan
+    working_df = df
+    if plan.get("dataset") == "members" and members_df is not None and not members_df.empty:
+        working_df = members_df
+    result = execute_plan(working_df, plan)
     narration = narrate_result(question, result)
     return result, narration, plan

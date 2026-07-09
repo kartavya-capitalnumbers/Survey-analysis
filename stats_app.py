@@ -52,6 +52,20 @@ st.set_page_config(page_title="Survey Statistical Analysis", layout="wide")
 
 
 # ---------------------------------------------------------------------------
+# The 10 IFC PS5 / RAP question categories are baked into stats._PLAN_SYSTEM
+# (the planner prompt) so the user can ask their own question in any of these
+# areas and have it routed correctly — see _DOMAIN_CATEGORIES in stats.py.
+# No fixed question list here; the "Ask in plain English" tab is the surface.
+# ---------------------------------------------------------------------------
+FAQ_CATEGORY_NAMES = [
+    "Census & demographics", "Land tenure & displacement", "Vulnerability identification",
+    "Livelihoods & income", "Housing & infrastructure", "Food security",
+    "Resettlement preferences & concerns", "Cross-tabulations & equity analysis",
+    "Qualitative synthesis", "Compliance & reporting (IFC PS5 completeness)",
+]
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -432,19 +446,22 @@ if df is not None:
             "Ask an analysis question. The model plans the statistic; pandas "
             "computes it; the model then narrates the computed numbers."
         )
+        st.caption("Ask about: " + " · ".join(FAQ_CATEGORY_NAMES))
         examples = [
             "What percentage of households are female-headed?",
-            "How many respondents reported water access issues?",
-            "Cross-tabulate vulnerability category by zone",
-            "What is the average household size by zone?",
-            "Which village has the highest income?",
+            "What is the sex disaggregation of the surveyed population?",
+            "Which households report the most severe food insecurity and what are their IDs?",
+            "Compare monthly income across land tenure categories",
+            "Does the dataset include sex-disaggregated data for all key indicators?",
         ]
         st.caption("Examples: " + " · ".join(f"_{e}_" for e in examples))
         question = st.text_input("Your question", key="stat_q")
         if st.button("Analyse", disabled=not question):
             try:
                 with st.spinner("Planning and computing…"):
-                    result, narration, plan = stats.answer_statistical_question(question, df)
+                    result, narration, plan = stats.answer_statistical_question(
+                        question, df, members_df=members_df
+                    )
                 st.session_state.stat_history.insert(0, (question, plan, result, narration))
             except stats.StatsError as exc:
                 st.error(str(exc))
