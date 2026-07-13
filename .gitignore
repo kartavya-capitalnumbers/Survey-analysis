@@ -9,6 +9,7 @@ venv/
 .venv/
 env/
 Survey Analysis Files/
+Survey analysis-client-docs/
 .env
 
 # Distribution / packaging
